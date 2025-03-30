@@ -1,8 +1,7 @@
 use num_bigint::{BigUint, RandBigInt};
-use num_traits::{FromPrimitive, One, Pow, ToPrimitive, Zero};
-use rand::{Rng, thread_rng};
+use num_traits::{FromPrimitive, One, Pow, Zero};
+use rand::{thread_rng};
 use rayon::prelude::*;
-use std::collections::HashSet;
 
 const SMALL_PRIMES: [u32; 201] = [
     2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
@@ -22,11 +21,6 @@ const SMALL_PRIMES: [u32; 201] = [
 enum Prime {
     Random,
     Safe,
-    Mersenne,
-}
-
-fn digits_to_bits(digits: usize) -> usize {
-    ((digits as f64) * 3.32192809489).ceil() as usize
 }
 
 fn generate_n_digit_number(digits: usize) -> BigUint {
@@ -101,6 +95,7 @@ fn gen_rand_large_prime(digits: usize) -> BigUint {
     if use_parallel {
         return gen_rand_large_prime_parallel(digits)
     }
+
     loop {
         let mut candidate = generate_n_digit_number(digits);
 
@@ -167,15 +162,10 @@ fn gen_safe_prime(digits: usize) -> BigUint {
     }
 }
 
-fn gen_mersenne_prime(digits: usize) -> BigUint {
-    todo!()
-}
-
 fn gen_large_prime(prime_type: Prime, digits: usize) -> BigUint {
     match prime_type {
         Prime::Random => gen_rand_large_prime(digits),
         Prime::Safe => gen_safe_prime(digits),
-        Prime::Mersenne => gen_mersenne_prime(digits),
     }
 }
 
