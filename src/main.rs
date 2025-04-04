@@ -1,6 +1,15 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+use std::process::Command;
+use std::path::Path;
+use std::fs;
+
+
 use num_bigint::{BigUint, RandBigInt};
+use num_prime::{nt_funcs::is_prime, Primality, PrimalityTestConfig};
 use num_traits::{FromPrimitive, One, Pow, Zero};
-use rand::{thread_rng};
+use rand::thread_rng;
 use rayon::prelude::*;
 
 const SMALL_PRIMES: [u32; 201] = [
@@ -17,25 +26,61 @@ const SMALL_PRIMES: [u32; 201] = [
     1163, 1171, 1181, 1187, 1193, 1201, 1213, 1217, 1223, 1229,
 ];
 
-#[derive(Clone, Copy, Debug)]
-enum Prime {
-    Random,
-    Safe,
+fn probable_prime_check(candidate: &BigUint) -> bool {
+    let config = PrimalityTestConfig::strict();
+    match is_prime(candidate, Some(config)) {
+        Primality::Yes => true,
+        Primality::No => false,
+        Primality::Probable(_) =>{
+            true
+        },
+    }
 }
 
-fn generate_n_digit_number(digits: usize) -> BigUint {
-    let mut rng = thread_rng();
+fn deterministic_prime_check(candidate: &BigUint) -> bool {
+    let script_content = format!("default(parisizemax, 12000000000) \nprint(isprime({}));\nquit;", candidate);
+    let script_path = Path::new("temp_prime_check.gp");
+    
+    let _ = fs::write(script_path, script_content);
+
+    let output = Command::new("gp")
+        .arg("-q")
+        .arg(script_path)
+        .output()
+        .expect("Failed to run PARI/GP");
+
+    let _ = fs::remove_file(script_path);
+
+    // println!("{}", String::from_utf8_lossy(&output.stdout));
+    // println!("Stderr: {}", String::from_utf8_lossy(&output.stderr));
+    
+    String::from_utf8_lossy(&output.stdout).trim() == "1"
+}
+
+fn generate_prime_candidate(digits: usize) -> BigUint {
     let lower = BigUint::from(10u32).pow(digits as u32 - 1);
     let upper = BigUint::from(10u32).pow(digits as u32);
 
-    rng.gen_biguint_range(&lower, &upper)
+    let mut rng = thread_rng();
+
+    loop {
+        let num = rng.gen_biguint_range(&lower, &upper);
+
+        if &num % 2u32 == BigUint::zero() {
+            let odd_num = num + BigUint::one();
+
+            if odd_num < upper {
+                return odd_num;
+            } else {
+                continue;
+            }
+        }
+
+        return num;
+    }
 }
 
 fn sieve_check(candidate: &BigUint) -> bool {
-    if candidate % 2u32 == BigUint::zero() && candidate != &BigUint::from(2u32) {
-        return false;
-    }
-
     for &p in SMALL_PRIMES.iter().skip(1) {
         let bp = BigUint::from_u32(p).unwrap();
         if candidate % &bp == BigUint::zero() && candidate != &bp {
@@ -45,131 +90,87 @@ fn sieve_check(candidate: &BigUint) -> bool {
     true
 }
 
-fn miller_rabin_check(candidate: &BigUint, k: u32) -> bool {
-    if candidate <= &BigUint::one() {
-        return false;
+fn gen_rand_large_prime(digits: usize) -> BigUint {
+    let parallel_threshhold = 50;
+
+    if digits >= parallel_threshhold {
+        gen_rand_large_prime_parallel(digits)
+    } else {
+        gen_rand_large_prime_sequential(digits)
     }
-
-    for &p in SMALL_PRIMES.iter() {
-        let bp = BigUint::from_u32(p).unwrap();
-        if candidate == &bp {
-            return true;
-        }
-    }
-
-    let mut d = candidate - BigUint::one();
-    let mut s = 0;
-
-    while &d % 2u32 == BigUint::zero() {
-        d /= 2u32;
-        s += 1;
-    }
-
-    let mut rng = thread_rng();
-    'witness: for _ in 0..k {
-        let a = rng.gen_biguint_range(&BigUint::from(2u32), &(candidate - 2u32));
-
-        let mut x = a.modpow(&d, candidate);
-
-        if x == BigUint::one() || x == candidate - BigUint::one() {
-            continue 'witness;
-        }
-
-        for _ in 0..s - 1 {
-            x = x.modpow(&BigUint::from(2u32), candidate);
-            if x == candidate - BigUint::one() {
-                continue 'witness;
-            }
-        }
-
-        return false;
-    }
-
-    true
 }
 
-fn gen_rand_large_prime(digits: usize) -> BigUint {
-    let parallel_threshhold = 100;
-    let use_parallel = digits >= parallel_threshhold;
-
-    if use_parallel {
-        return gen_rand_large_prime_parallel(digits)
-    }
-
+fn gen_rand_large_prime_sequential(digits: usize) -> BigUint {
     loop {
-        let mut candidate = generate_n_digit_number(digits);
-
-        if &candidate % 2u32 == BigUint::zero() {
-            candidate += BigUint::one();
-            if candidate >= BigUint::from(10u32).pow(digits as u32) {
-                continue;
-            }
-        }
+        let candidate = generate_prime_candidate(digits);
 
         if !sieve_check(&candidate) {
             continue;
         }
 
-        if miller_rabin_check(&candidate, 20) {
-            return candidate;
+        if probable_prime_check(&candidate) {
+            if deterministic_prime_check(&candidate) {
+                return candidate;
+            }
         }
     }
 }
 
 fn gen_rand_large_prime_parallel(digits: usize) -> BigUint {
-    let num_candidates = num_cpus::get() * 2;
-    
+    let cpus = num_cpus::get();
+    let num_candidates = cpus * 4;
+    let found = Arc::new(AtomicBool::new(false));
+
     loop {
         let candidates: Vec<BigUint> = (0..num_candidates)
-            .map(|_| {
-                let mut n = generate_n_digit_number(digits);
-                if &n % 2u32 == BigUint::zero() {
-                    n += BigUint::one();
-                }
-                n
-            })
+            .into_par_iter()
+            .map(|_| generate_prime_candidate(digits))
             .collect();
-        
+
         let sieved_candidates: Vec<BigUint> = candidates
             .into_par_iter()
             .filter(|c| sieve_check(c))
             .collect();
-        
-        let prime_result = sieved_candidates
-            .par_iter()
-            .find_first(|c| miller_rabin_check(c, 20));
-        
+
+        let found_arc = Arc::clone(&found);
+        let prime_result = sieved_candidates.par_iter().find_map_first(|c| {
+            if found_arc.load(Ordering::Relaxed) {
+                return None;
+            }
+
+            if probable_prime_check(c) {
+                if deterministic_prime_check(c) {
+                    found_arc.store(true, Ordering::Relaxed);
+                    Some(c.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+
         if let Some(prime) = prime_result {
+            found.store(false, Ordering::Relaxed);
             return prime.clone();
         }
-    }
-}
-
-fn gen_safe_prime(digits: usize) -> BigUint {
-    loop {
-        let q = gen_rand_large_prime(digits - 1);
-
-        let p = &q * 2u32 + BigUint::one();
-
-        let p_digits = p.to_string().len();
-        if  p_digits != digits {
-            continue;
-        }
-
-        if sieve_check(&p) && miller_rabin_check(&p, 20) {
-            return p;
-        }
-    }
-}
-
-fn gen_large_prime(prime_type: Prime, digits: usize) -> BigUint {
-    match prime_type {
-        Prime::Random => gen_rand_large_prime(digits),
-        Prime::Safe => gen_safe_prime(digits),
+        found.store(false, Ordering::Relaxed);
     }
 }
 
 fn main() {
-    println!("{}", gen_large_prime(Prime::Random, 100));
-    println!("{}", gen_large_prime(Prime::Safe, 100));
+    let digits_arr: Vec<usize> = vec![10, 50, 100, 300, 800, 1000, 1500];
+
+    for digits in digits_arr {
+
+        let start = Instant::now();
+        let test = gen_rand_large_prime(digits);
+        let duration = start.elapsed();
+        println!("----------------------------------------");
+        println!("{} digit prime:", digits);
+        println!("{}", test);
+        println!("Time elapsed: {:.2?}", duration);
+        println!("----------------------------------------");
+
+    }
 }
